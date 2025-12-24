@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- virtualization_v1alpha1_inventoryconfig.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
