@@ -25,16 +25,18 @@ type InventoryReconciler struct {
 
 func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
-    log.Info("Reconciling InventoryConfig","namespace", config.Namespace, "name", config.Name)
-
-    log.Info("Fetching details", "database", "postgres", "interval", "5m")
 	// Fetch the VM from the local cache
 	var vm kubevirtv1.VirtualMachine
 	if err := r.Get(ctx, req.NamespacedName, &vm); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+     l.Info("Reconciling VirtualMachine", 
+        "namespace", vm.Namespace, 
+        "name", vm.Name,
+        "cluster", r.ClusterName)
 
-	// Logic to sync to Postgres
+     l.Info("Fetching details", "database", "postgres", "interval", "5m")
+	 // Logic to sync to Postgres
 	annoData, _ := json.Marshal(vm.Annotations)
 	_, err := r.DB.Exec(`
 		INSERT INTO vm_inventory (cluster_name, vm_name, namespace, annotations, last_seen)
