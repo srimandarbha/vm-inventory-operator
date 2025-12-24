@@ -25,7 +25,7 @@ type InventoryReconciler struct {
 
 func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
-
+    fmt.Printf(">>> Reconcile triggered for: %s in namespace %s\n", req.Name, req.Namespace)
 	// Fetch the VM from the local cache
 	var vm kubevirtv1.VirtualMachine
 	if err := r.Get(ctx, req.NamespacedName, &vm); err != nil {
