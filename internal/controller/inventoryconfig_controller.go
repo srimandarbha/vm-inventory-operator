@@ -28,8 +28,14 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Fetch the VM from the local cache
 	var vm kubevirtv1.VirtualMachine
 	if err := r.Get(ctx, req.NamespacedName, &vm); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
+    if errors.IsNotFound(err) {
+        // VM is gone! Run your SQL DELETE here
+        _, err := r.DB.Exec("DELETE FROM vm_inventory WHERE vm_name = $1 AND namespace = $2", req.Name, req.Namespace)
+        return ctrl.Result{}, err
+    }
+    return ctrl.Result{}, err
+    }
+	
      l.Info("Reconciling VirtualMachine", 
         "namespace", vm.Namespace, 
         "name", vm.Name,
