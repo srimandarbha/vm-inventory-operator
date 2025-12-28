@@ -1,26 +1,3 @@
-CREATE TABLE IF NOT EXISTS vm_history (
-    id SERIAL PRIMARY KEY,
-    vm_name TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    cluster_name TEXT NOT NULL,
-    action TEXT NOT NULL, -- e.g., 'CREATE', 'UPDATE', 'DELETE'
-    annotations JSONB,
-    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS vm_inventory (
-    id SERIAL PRIMARY KEY,
-    vm_name TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    cluster_name TEXT NOT NULL,
-    annotations JSONB, -- JSONB is faster for searching/updating than plain JSON
-    last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    -- This constraint is critical for the "ON CONFLICT" logic to work
-    UNIQUE (vm_name, namespace)
-);
-
-##########################
-
 -- 1. Main Inventory Table: Represents the current "Source of Truth"
 -- Each VM is uniquely identified by the combination of Cluster, Namespace, and Name.
 CREATE TABLE IF NOT EXISTS vm_inventory (
@@ -97,19 +74,3 @@ LEFT JOIN
                AND i.namespace = d.namespace
 GROUP BY 
     i.cluster_name, i.namespace, i.vm_name, i.status, i.node_name, i.ip_address, i.cpu_cores, i.memory_gb;
-##########################################
-
-
-ALTER TABLE vm_inventory 
-ADD COLUMN node_name TEXT,
-ADD COLUMN status TEXT,
-ADD COLUMN cpu_cores INTEGER,
-ADD COLUMN memory_gb TEXT,
-ADD COLUMN os_distro TEXT,
-ADD COLUMN ip_address TEXT;
-
--- Do the same for history if you want to track changes in status/resources
-ALTER TABLE vm_history 
-ADD COLUMN node_name TEXT,
-ADD COLUMN status TEXT,
-ADD COLUMN ip_address TEXT;
