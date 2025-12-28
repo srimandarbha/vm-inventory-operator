@@ -3,6 +3,16 @@
 
 ## Description
 // TODO(user): An in-depth paragraph about your project and overview of use
+```
+export DEV_MODE="true"
+export DB_USER="myuser"
+export DB_PASS="mypassword"
+export DB_HOST="localhost"
+export DB_NAME="vm_inventory"
+export CLUSTER_NAME="local-dev"
+
+go run ./cmd/main.go --leader-elect=false
+```
 
 ## Getting Started
 
