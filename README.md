@@ -12,6 +12,10 @@ export DB_NAME="vm_inventory"
 export CLUSTER_NAME="local-dev"
 
 go run ./cmd/main.go --leader-elect=false
+
+or
+
+./manager --leader-elect=false --zap-devel=true
 ```
 
 ## Getting Started
