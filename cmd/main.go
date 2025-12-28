@@ -55,10 +55,19 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// 1. Vault Secret Integration & DB Connection
-	// These files are injected by the Vault Sidecar
-	dbUser, errUser := os.ReadFile("/vault/secrets/db-user")
-	dbPass, errPass := os.ReadFile("/vault/secrets/db-pass")
+    var user, pass string
+
+// Check if running locally via Env Vars
+    if os.Getenv("DEV_MODE") == "true" {
+        user = os.Getenv("DB_USER")
+        pass = os.Getenv("DB_PASS")
+    } else {
+    // Fallback to Vault files for Production/OpenShift
+        u, errUser := os.ReadFile("/vault/secrets/db-user")
+        p, errPass := os.ReadFile("/vault/secrets/db-pass")
+        user = strings.TrimSpace(string(u))
+        pass = strings.TrimSpace(string(p))
+    }
 	
 	dbHost := os.Getenv("DB_HOST") // Passed from Helm values.yaml
 	dbName := os.Getenv("DB_NAME") // Passed from Helm values.yaml
@@ -67,10 +76,6 @@ func main() {
 		setupLog.Error(nil, "Missing DB configuration. Ensure Vault injection and Helm env vars are correct.")
 		os.Exit(1)
 	}
-
-	// Clean up potential whitespace from Vault files
-	user := strings.TrimSpace(string(dbUser))
-	pass := strings.TrimSpace(string(dbPass))
 
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", 
 		dbHost, user, pass, dbName)
