@@ -76,7 +76,12 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	osDistro := vm.Labels["kubevirt.io/os"]
 	annoData, _ := json.Marshal(vm.Annotations)
+// ... after fetching 'vm' ...
 
+    l.Info("Inspecting VM Labels", "vm", vm.Name)
+    for key, value := range vm.Labels {
+       l.Info("Found Label", "key", key, "value", value)
+    }
 	// 5. Database Transaction
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
