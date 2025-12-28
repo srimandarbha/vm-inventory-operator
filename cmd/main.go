@@ -56,26 +56,33 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
     var user, pass string
-
-// Check if running locally via Env Vars
+    var err error
+	
     if os.Getenv("DEV_MODE") == "true" {
+        setupLog.Info("Running in DEV_MODE, using environment variables for DB credentials")
         user = os.Getenv("DB_USER")
         pass = os.Getenv("DB_PASS")
     } else {
-    // Fallback to Vault files for Production/OpenShift
         u, errUser := os.ReadFile("/vault/secrets/db-user")
         p, errPass := os.ReadFile("/vault/secrets/db-pass")
+        
+        if errUser != nil || errPass != nil {
+            setupLog.Error(nil, "Failed to read Vault secrets. Check sidecar injection.")
+            os.Exit(1)
+        }
+        
         user = strings.TrimSpace(string(u))
         pass = strings.TrimSpace(string(p))
     }
-	
-	dbHost := os.Getenv("DB_HOST") // Passed from Helm values.yaml
-	dbName := os.Getenv("DB_NAME") // Passed from Helm values.yaml
+    
+    dbHost := os.Getenv("DB_HOST") 
+    dbName := os.Getenv("DB_NAME")
 
-	if errUser != nil || errPass != nil || dbHost == "" || dbName == "" {
-		setupLog.Error(nil, "Missing DB configuration. Ensure Vault injection and Helm env vars are correct.")
-		os.Exit(1)
-	}
+    // Validate connectivity details
+    if user == "" || pass == "" || dbHost == "" || dbName == "" {
+        setupLog.Error(nil, "Missing DB configuration. Check ENV vars (DB_HOST, DB_NAME, etc.)")
+        os.Exit(1)
+    }
 
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", 
 		dbHost, user, pass, dbName)
