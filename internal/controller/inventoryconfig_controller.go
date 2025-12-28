@@ -68,7 +68,7 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	cpu := 0
 	mem := ""
 	if vm.Spec.Template.Spec.Domain.Resources.Requests != nil {
-		cpu = int(vm.Spec.Template.Spec.Domain.Resources.Requests.Cpu().Value())
+		cpu = int(vm.Spec.Template.Spec.Domain.Resources.Requests.Cpu().MilliValue()) / 1000
 		mem = vm.Spec.Template.Spec.Domain.Resources.Requests.Memory().String()
 	}
 
