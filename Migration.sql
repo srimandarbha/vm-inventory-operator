@@ -74,3 +74,17 @@ LEFT JOIN
                AND i.namespace = d.namespace
 GROUP BY 
     i.cluster_name, i.namespace, i.vm_name, i.status, i.node_name, i.ip_address, i.cpu_cores, i.memory_gb;
+
+
+==========================
+
+
+-- 1. Updated Disks table with Storage insights
+ALTER TABLE vm_disks 
+ADD COLUMN IF NOT EXISTS storage_class TEXT,
+ADD COLUMN IF NOT EXISTS capacity_gb   TEXT,
+ADD COLUMN IF NOT EXISTS volume_phase  TEXT;
+
+-- 2. Ensure History has a unique constraint or index for the 'WHERE NOT EXISTS' check
+CREATE INDEX IF NOT EXISTS idx_vm_history_status_node 
+ON vm_history (cluster_name, vm_name, namespace, status, node_name);
