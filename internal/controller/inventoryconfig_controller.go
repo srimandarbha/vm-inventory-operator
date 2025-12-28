@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,20 +28,20 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Fetch the VM from the local cache
 	var vm kubevirtv1.VirtualMachine
 	if err := r.Get(ctx, req.NamespacedName, &vm); err != nil {
-    if errors.IsNotFound(err) {
-        // VM is gone! Run your SQL DELETE here
-        _, err := r.DB.Exec("DELETE FROM vm_inventory WHERE vm_name = $1 AND namespace = $2", req.Name, req.Namespace)
-        return ctrl.Result{}, err
-    }
-    return ctrl.Result{}, err
+      if apierrors.IsNotFound(err) {
+          // VM is gone! Run your SQL DELETE here
+          _, err := r.DB.Exec("DELETE FROM vm_inventory WHERE vm_name = $1 AND namespace = $2", req.Name, req.Namespace)
+          return ctrl.Result{}, err
+      }
+      return ctrl.Result{}, err
     }
 	
-     l.Info("Reconciling VirtualMachine", 
+    l.Info("Reconciling VirtualMachine", 
         "namespace", vm.Namespace, 
         "name", vm.Name,
         "cluster", r.ClusterName)
 
-     l.Info("Fetching details", "database", "postgres", "interval", "5m")
+    l.Info("Fetching details", "database", "postgres", "interval", "5m")
 	 // Logic to sync to Postgres
 	annoData, _ := json.Marshal(vm.Annotations)
 	_, err := r.DB.Exec(`
