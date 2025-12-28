@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 )
 
 type InventoryReconciler struct {
@@ -58,9 +59,9 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	mem := vm.Spec.Template.Spec.Domain.Resources.Requests.Memory().String()
 	osDistro := vm.Labels["kubevirt.io/os"]
 
-	// 4. Database Transaction
+	// 4. Database Transaction with Retry Logic
 	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil { return ctrl.Result{}, err }
+	if err != nil { return ctrl.Result{RequeueAfter: 5 * time.Second}, err }
 	defer tx.Rollback()
 
 	annoData, _ := json.Marshal(vm.Annotations)
@@ -75,7 +76,9 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil { return ctrl.Result{}, err }
 
 	// 6. Sync Disks
-	_, _ = tx.ExecContext(ctx, "DELETE FROM vm_disks WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3", r.ClusterName, vm.Name, vm.Namespace)
+	_, err = tx.ExecContext(ctx, "DELETE FROM vm_disks WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3", r.ClusterName, vm.Name, vm.Namespace)
+	if err != nil { return ctrl.Result{}, err }
+
 	for _, vol := range vm.Spec.Template.Spec.Volumes {
 		claim, vType := "", "unknown"
 		if vol.PersistentVolumeClaim != nil {
@@ -85,15 +88,33 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		} else if vol.ContainerDisk != nil {
 			vType = "containerDisk"
 		}
-		_, _ = tx.ExecContext(ctx, "INSERT INTO vm_disks (cluster_name, vm_name, namespace, disk_name, claim_name, volume_type) VALUES ($1,$2,$3,$4,$5,$6)",
+		_, err = tx.ExecContext(ctx, "INSERT INTO vm_disks (cluster_name, vm_name, namespace, disk_name, claim_name, volume_type) VALUES ($1,$2,$3,$4,$5,$6)",
 			r.ClusterName, vm.Name, vm.Namespace, vol.Name, claim, vType)
+		if err != nil { return ctrl.Result{}, err }
 	}
 
 	// 7. Update History
-	_, _ = tx.ExecContext(ctx, "INSERT INTO vm_history (cluster_name, vm_name, namespace, status, node_name, action) VALUES ($1,$2,$3,$4,$5,'SYNC')",
+	_, err = tx.ExecContext(ctx, "INSERT INTO vm_history (cluster_name, vm_name, namespace, status, node_name, action) VALUES ($1,$2,$3,$4,$5,'SYNC')",
 		r.ClusterName, vm.Name, vm.Namespace, status, nodeName)
+	if err != nil { return ctrl.Result{}, err }
+
+	if err := tx.Commit(); err != nil { return ctrl.Result{RequeueAfter: 5 * time.Second}, err }
 
 	l.Info("Successfully synced VM", "vm", vm.Name, "status", status)
+	return ctrl.Result{}, nil
+}
+
+func (r *InventoryReconciler) handleDeletion(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil { return ctrl.Result{}, err }
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, "DELETE FROM vm_inventory WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3", r.ClusterName, req.Name, req.Namespace)
+	if err != nil { return ctrl.Result{}, err }
+
+	_, err = tx.ExecContext(ctx, "INSERT INTO vm_history (cluster_name, vm_name, namespace, action) VALUES ($1,$2,$3,'DELETE')", r.ClusterName, req.Name, req.Namespace)
+	if err != nil { return ctrl.Result{}, err }
+
 	return ctrl.Result{}, tx.Commit()
 }
 
@@ -101,16 +122,16 @@ func (r *InventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kubevirtv1.VirtualMachine{}).
 		Watches(&kubevirtv1.VirtualMachineInstance{}, &handler.EnqueueRequestForObject{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 5}).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				oldVM, ok1 := e.ObjectOld.(*kubevirtv1.VirtualMachine)
-				newVM, ok2 := e.ObjectNew.(*kubevirtv1.VirtualMachine)
-				if ok1 && ok2 {
+				if oldVM, ok := e.ObjectOld.(*kubevirtv1.VirtualMachine); ok {
+					newVM := e.ObjectNew.(*kubevirtv1.VirtualMachine)
 					return !reflect.DeepEqual(oldVM.Annotations, newVM.Annotations) ||
 						oldVM.Status.PrintableStatus != newVM.Status.PrintableStatus ||
 						oldVM.Generation != newVM.Generation
 				}
-				return true
+				return true // Always sync VMI updates (IP/Node)
 			},
 		}).
 		Complete(r)
