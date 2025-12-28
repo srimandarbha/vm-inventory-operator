@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chart.fullname" . }}
+  annotations:
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/role: {{ .Values.vault.role | quote }}
+    vault.hashicorp.com/agent-inject-secret-db-user: {{ .Values.vault.secretPath | quote }}
+    vault.hashicorp.com/agent-inject-template-db-user: |
+      {{`{{- with secret `}} {{ .Values.vault.secretPath | quote }} {{` -}} {{ .Data.username }} {{- end }}`}}
+    vault.hashicorp.com/agent-inject-secret-db-pass: {{ .Values.vault.secretPath | quote }}
+    vault.hashicorp.com/agent-inject-template-db-pass: |
+      {{`{{- with secret `}} {{ .Values.vault.secretPath | quote }} {{` -}} {{ .Data.password }} {{- end }}`}}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: vm-inventory-operator
+  template:
+    metadata:
+      labels:
+        app: vm-inventory-operator
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          env:
+            - name: CLUSTER_NAME
+              value: {{ .Values.config.clusterName | quote }}
+            - name: DB_HOST
+              value: {{ .Values.config.dbHost | quote }}
+            - name: DB_NAME
+              value: {{ .Values.config.dbName | quote }}

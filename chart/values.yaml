@@ -1,0 +1,21 @@
+# Default values for vm-inventory-operator
+replicaCount: 1
+
+image:
+  repository: your-registry/vm-inventory-operator
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+config:
+  clusterName: "default-cluster" # Overridden per cluster
+  dbHost: "postgres.example.com"
+  dbName: "inventory_db"
+
+vault:
+  enabled: true
+  role: "inventory-operator-role"
+  secretPath: "database/creds/inventory-app"
+
+serviceAccount:
+  create: true
+  name: "vm-inventory-sa"
