@@ -74,7 +74,7 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		mem = vm.Spec.Template.Spec.Domain.Resources.Requests.Memory().String()
 	}
 
-	osDistro := vm.Labels["kubevirt.io/os"]
+	osDistro := vm.Labels["kubevirt.io/template"]
 	annoData, _ := json.Marshal(vm.Annotations)
 // ... after fetching 'vm' ...
 
