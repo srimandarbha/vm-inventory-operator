@@ -3,7 +3,9 @@ package main
 import (
 	"database/sql"
 	"flag"
+	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	// Import the postgres driver
@@ -25,7 +27,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	// Local project imports (Update the module path to match your go.mod)
+	// Local project imports
 	"github.com/srimandarbha/vm-inventory-operator/internal/controller"
 )
 
@@ -37,7 +39,6 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
-	// +kubebuilder:scaffold:scheme
 }
 
 func main() {
@@ -46,9 +47,7 @@ func main() {
 	var probeAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager. "+
-			"Enabling this will ensure there is only one active controller manager.")
+	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -56,29 +55,42 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// 1. Configure DB Connection (Remote PostgreSQL)
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		setupLog.Error(nil, "DATABASE_URL env var is required")
+	// 1. Vault Secret Integration & DB Connection
+	// These files are injected by the Vault Sidecar
+	dbUser, errUser := os.ReadFile("/vault/secrets/db-user")
+	dbPass, errPass := os.ReadFile("/vault/secrets/db-pass")
+	
+	dbHost := os.Getenv("DB_HOST") // Passed from Helm values.yaml
+	dbName := os.Getenv("DB_NAME") // Passed from Helm values.yaml
+
+	if errUser != nil || errPass != nil || dbHost == "" || dbName == "" {
+		setupLog.Error(nil, "Missing DB configuration. Ensure Vault injection and Helm env vars are correct.")
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", dbURL)
+	// Clean up potential whitespace from Vault files
+	user := strings.TrimSpace(string(dbUser))
+	pass := strings.TrimSpace(string(dbPass))
+
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", 
+		dbHost, user, pass, dbName)
+
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		setupLog.Error(err, "unable to connect to database")
 		os.Exit(1)
 	}
 
-	// SRE Best Practice: Configure Connection Pool
+	// SRE Best Practice: Connection Pooling for Transactions
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	// 2. Setup Label Filter Selector (sre.org.io/inventorysync=true)
+	// 2. Setup Label Filter Selector (Only sync VMs with this label)
 	labelReq, _ := labels.NewRequirement("sre.org.io/inventorysync", selection.Equals, []string{"true"})
 	selector := labels.NewSelector().Add(*labelReq)
 
-	// 3. Initialize Manager with Filtered Cache
+	// 3. Initialize Manager
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
@@ -95,6 +107,8 @@ func main() {
 				&kubevirtv1.VirtualMachine{}: {
 					Label: selector,
 				},
+				// Note: We don't filter VMIs so we can always catch IP updates
+				&kubevirtv1.VirtualMachineInstance{}: {}, 
 			},
 		},
 	})
@@ -103,12 +117,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 4. Register the Inventory Reconciler
+	// 4. Get Cluster Name from Env (Helm values.yaml)
 	clusterName := os.Getenv("CLUSTER_NAME")
 	if clusterName == "" {
 		clusterName = "unknown-cluster"
 	}
 
+	// 5. Register the Inventory Reconciler
 	if err = (&controller.InventoryReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
@@ -119,7 +134,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 5. Add Health and Readiness Checks
+	// 6. Health Checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
@@ -129,7 +144,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting manager")
+	setupLog.Info("starting manager", "cluster", clusterName, "db_host", dbHost)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
