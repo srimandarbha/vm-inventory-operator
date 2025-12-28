@@ -13,11 +13,11 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
 )
 
 type InventoryReconciler struct {
@@ -29,7 +29,6 @@ type InventoryReconciler struct {
 
 func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
-	// Using 'l' immediately satisfies the compiler and provides debug info
 	l.Info("Reconciling VirtualMachine", "name", req.Name, "namespace", req.Namespace)
 
 	// 1. Fetch VM
@@ -55,7 +54,9 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// 4. Extract Data
 	status := string(vm.Status.PrintableStatus)
-	if status == "" { status = "Provisioning" }
+	if status == "" {
+		status = "Provisioning"
+	}
 
 	nodeName, ipAddr := "", ""
 	if vmiFound {
@@ -68,41 +69,41 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	cpu := 0
 	mem := ""
 	if vm.Spec.Template.Spec.Domain.Resources.Requests != nil {
+		// Convert milli-cores to whole cores safely for DB
 		cpu = int(vm.Spec.Template.Spec.Domain.Resources.Requests.Cpu().MilliValue()) / 1000
 		mem = vm.Spec.Template.Spec.Domain.Resources.Requests.Memory().String()
 	}
 
+	osDistro := vm.Labels["kubevirt.io/os"]
+	annoData, _ := json.Marshal(vm.Annotations)
+
 	// 5. Database Transaction
 	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil { 
+	if err != nil {
 		l.Error(err, "Failed to begin transaction")
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, err 
+		return ctrl.Result{}, err
 	}
 	defer tx.Rollback()
 
-	annoData, _ := json.Marshal(vm.Annotations)
+	// 6. Update Inventory (Fixed: Uses all extracted variables)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO vm_inventory (cluster_name, vm_name, namespace, status, node_name, ip_address, cpu_cores, memory_gb, os_distro, annotations, last_seen)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+		ON CONFLICT (cluster_name, vm_name, namespace) 
+		DO UPDATE SET status=$4, node_name=$5, ip_address=$6, cpu_cores=$7, memory_gb=$8, os_distro=$9, annotations=$10, last_seen=NOW()`,
+		r.ClusterName, vm.Name, vm.Namespace, status, nodeName, ipAddr, cpu, mem, osDistro, annoData)
+	if err != nil {
+		l.Error(err, "Failed to upsert inventory table")
+		return ctrl.Result{}, err
+	}
 
-// 8. Deduplicated History Insert (FIXED SQL)
-    _, err = tx.ExecContext(ctx, `
-    INSERT INTO vm_history (cluster_name, vm_name, namespace, status, node_name, action) 
-    SELECT $1, $2, $3, $4, $5, 'SYNC'
-    WHERE NOT EXISTS (
-        SELECT 1 FROM (
-            SELECT status, node_name FROM vm_history 
-            WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3 
-            ORDER BY changed_at DESC LIMIT 1
-        ) AS last_state 
-        WHERE last_state.status = $4 AND last_state.node_name = $5
-    )`, 
-    r.ClusterName, vm.Name, vm.Namespace, status, nodeName)
+	// 7. Sync Disks (Strict error checking added to prevent aborted transactions)
+	_, err = tx.ExecContext(ctx, "DELETE FROM vm_disks WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3", r.ClusterName, vm.Name, vm.Namespace)
+	if err != nil {
+		l.Error(err, "Failed to clear old disks")
+		return ctrl.Result{}, err
+	}
 
-   if err != nil {
-      l.Error(err, "Failed to insert history - syntax error corrected")
-      return ctrl.Result{}, err // Rollback via defer
-   }
-
-	// 7. Sync Disks
-	_, _ = tx.ExecContext(ctx, "DELETE FROM vm_disks WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3", r.ClusterName, vm.Name, vm.Namespace)
 	for _, vol := range vm.Spec.Template.Spec.Volumes {
 		claimName, vType, sc, cap, phase := "", "unknown", "", "", ""
 		if vol.PersistentVolumeClaim != nil {
@@ -111,28 +112,47 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			pvc := &corev1.PersistentVolumeClaim{}
 			if err := r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: claimName}, pvc); err == nil {
 				phase = string(pvc.Status.Phase)
-				if pvc.Spec.StorageClassName != nil { sc = *pvc.Spec.StorageClassName }
-				if c, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok { cap = c.String() }
+				if pvc.Spec.StorageClassName != nil {
+					sc = *pvc.Spec.StorageClassName
+				}
+				if c, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
+					cap = c.String()
+				}
 			}
 		}
-		_, _ = tx.ExecContext(ctx, `INSERT INTO vm_disks (cluster_name, vm_name, namespace, disk_name, claim_name, volume_type, storage_class, capacity_gb, volume_phase) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO vm_disks (cluster_name, vm_name, namespace, disk_name, claim_name, volume_type, storage_class, capacity_gb, volume_phase) 
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 			r.ClusterName, vm.Name, vm.Namespace, vol.Name, claimName, vType, sc, cap, phase)
+		if err != nil {
+			l.Error(err, "Disk sync failed", "disk", vol.Name)
+			return ctrl.Result{}, err
+		}
 	}
 
-	// 8. Deduplicated History Insert
+	// 8. Deduplicated History Insert (Fixed: Removed HAVING, added subquery check)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO vm_history (cluster_name, vm_name, namespace, status, node_name, action) 
 		SELECT $1, $2, $3, $4, $5, 'SYNC'
 		WHERE NOT EXISTS (
-			SELECT 1 FROM vm_history 
-			WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3 
-			ORDER BY changed_at DESC LIMIT 1 
-			HAVING status=$4 AND node_name=$5
-		)`, r.ClusterName, vm.Name, vm.Namespace, status, nodeName)
+			SELECT 1 FROM (
+				SELECT status, node_name FROM vm_history 
+				WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3 
+				ORDER BY changed_at DESC LIMIT 1
+			) AS last_state 
+			WHERE last_state.status = $4 AND last_state.node_name = $5
+		)`,
+		r.ClusterName, vm.Name, vm.Namespace, status, nodeName)
+	if err != nil {
+		l.Error(err, "Failed to insert history")
+		return ctrl.Result{}, err
+	}
 
-	if err := tx.Commit(); err != nil { 
+	// 9. Final Commit
+	if err := tx.Commit(); err != nil {
 		l.Error(err, "Failed to commit transaction")
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, err 
+		return ctrl.Result{}, err
 	}
 
 	l.Info("Successfully synced VM", "name", vm.Name)
@@ -142,15 +162,19 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *InventoryReconciler) handleDeletion(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx)
 	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil { return ctrl.Result{}, err }
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	defer tx.Rollback()
 
-	// 1. Delete Inventory
+	// 1. Delete Inventory (Cascade delete should handle vm_disks if setup correctly in SQL)
 	_, err = tx.ExecContext(ctx, "DELETE FROM vm_inventory WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3", r.ClusterName, req.Name, req.Namespace)
-	if err != nil { return ctrl.Result{}, err }
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
-	// 2. Log History (only once per minute to avoid spam on multi-delete events)
-	_, _ = tx.ExecContext(ctx, `
+	// 2. Log History
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO vm_history (cluster_name, vm_name, namespace, action, status) 
 		SELECT $1, $2, $3, 'DELETE', 'Deleted'
 		WHERE NOT EXISTS (
@@ -158,6 +182,9 @@ func (r *InventoryReconciler) handleDeletion(ctx context.Context, req ctrl.Reque
 			WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3 AND action='DELETE'
 			AND changed_at > NOW() - INTERVAL '1 minute'
 		)`, r.ClusterName, req.Name, req.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	l.Info("Completed deletion sync for VM", "name", req.Name)
 	return ctrl.Result{}, tx.Commit()
@@ -174,7 +201,9 @@ func (r *InventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				if oldVM, ok := e.ObjectOld.(*kubevirtv1.VirtualMachine); ok {
 					newVM := e.ObjectNew.(*kubevirtv1.VirtualMachine)
-					if !newVM.DeletionTimestamp.IsZero() { return false }
+					if !newVM.DeletionTimestamp.IsZero() {
+						return false
+					}
 					return !reflect.DeepEqual(oldVM.Annotations, newVM.Annotations) ||
 						oldVM.Status.PrintableStatus != newVM.Status.PrintableStatus ||
 						oldVM.Generation != newVM.Generation
