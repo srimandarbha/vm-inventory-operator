@@ -8,10 +8,7 @@ import (
 	"strings"
 	"time"
 
-	// Import the postgres driver
 	_ "github.com/lib/pq"
-
-	// Kubernetes and Controller-Runtime imports
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
@@ -25,9 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	// Local project imports
 	"github.com/srimandarbha/vm-inventory-operator/internal/controller"
 )
 
@@ -55,18 +50,17 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// 1. Database Credentials Logic
+	// 1. Database Credentials Logic (Vault vs local Env)
 	var user, pass string
 	if os.Getenv("DEV_MODE") == "true" {
-		setupLog.Info("Running in DEV_MODE, pulling credentials from Environment Variables")
+		setupLog.Info("Running in DEV_MODE, using environment variables")
 		user = os.Getenv("DB_USER")
 		pass = os.Getenv("DB_PASS")
 	} else {
-		setupLog.Info("Running in PRODUCTION mode, pulling credentials from Vault injected files")
 		u, errUser := os.ReadFile("/vault/secrets/db-user")
 		p, errPass := os.ReadFile("/vault/secrets/db-pass")
 		if errUser != nil || errPass != nil {
-			setupLog.Error(nil, "Unable to read Vault secrets at /vault/secrets/. Check sidecar injection.")
+			setupLog.Error(nil, "Unable to read Vault secrets at /vault/secrets/")
 			os.Exit(1)
 		}
 		user = strings.TrimSpace(string(u))
@@ -75,47 +69,36 @@ func main() {
 
 	dbHost := os.Getenv("DB_HOST")
 	dbName := os.Getenv("DB_NAME")
-	if user == "" || pass == "" || dbHost == "" || dbName == "" {
-		setupLog.Error(nil, "Missing DB configuration (User/Pass/Host/Name).")
-		os.Exit(1)
-	}
+	clusterName := os.Getenv("CLUSTER_NAME")
+	if clusterName == "" { clusterName = "unnamed-cluster" }
 
-	// 2. Database Connection Pool Setup
+	// 2. Initialize DB Connection Pool
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", dbHost, user, pass, dbName)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		setupLog.Error(err, "Could not open SQL connection")
+		setupLog.Error(err, "Unable to open database")
 		os.Exit(1)
 	}
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	// 3. Cache and Filter Configuration
-	// Label Selector: Only sync VMs with this label
+	// 3. Cache Filtering and Resync Configuration
 	labelReq, _ := labels.NewRequirement("sre.org.io/inventorysync", selection.Equals, []string{"true"})
 	selector := labels.NewSelector().Add(*labelReq)
-	
-	// Resync Period: Forced full-sync every 10 hours to prevent DB drift
 	resyncPeriod := 10 * time.Hour
 
-	// 4. Initialize Manager with Cluster-wide Cache Options
+	// 4. Initialize Manager (Cluster-wide by default)
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
-		Metrics: metricsserver.Options{
-			BindAddress: metricsAddr,
-		},
+		Metrics: metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "vm-inventory-sync-lock.sre.io",
 		Cache: cache.Options{
 			SyncPeriod: &resyncPeriod,
-			// Since DefaultNamespaces is not set, we operate CLUSTER-WIDE
 			ByObject: map[client.Object]cache.ByObject{
-				&kubevirtv1.VirtualMachine{}: {
-					Label: selector,
-				},
-				// Watch all VMIs to catch IP/Node/Status changes for active VMs
+				&kubevirtv1.VirtualMachine{}: {Label: selector},
 				&kubevirtv1.VirtualMachineInstance{}: {}, 
 			},
 		},
@@ -125,38 +108,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 5. Register the Inventory Reconciler
-	clusterName := os.Getenv("CLUSTER_NAME")
-	if clusterName == "" {
-		clusterName = "unnamed-cluster"
-	}
-
+	// 5. Register Reconciler
 	if err = (&controller.InventoryReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
 		DB:          db,
 		ClusterName: clusterName,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Unable to create controller", "controller", "Inventory")
+		setupLog.Error(err, "Unable to create controller")
 		os.Exit(1)
 	}
 
-	// 6. Kubernetes Health & Ready Probes
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Unable to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Unable to set up ready check")
-		os.Exit(1)
-	}
+	// 6. Health Checks
+	_ = mgr.AddHealthzCheck("healthz", healthz.Ping)
+	_ = mgr.AddReadyzCheck("readyz", healthz.Ping)
 
-	// 7. Start the Manager
-	setupLog.Info("Starting VM Inventory Manager", 
-		"cluster", clusterName, 
-		"resync_period", resyncPeriod.String(),
-		"db_host", dbHost)
-
+	setupLog.Info("Starting VM Inventory Manager", "cluster", clusterName)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Problem running manager")
 		os.Exit(1)
