@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -93,14 +94,17 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *InventoryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kubevirtv1.VirtualMachine{}).
-		// 1. Trigger reconcile when the running state (VMI) changes (IP/Node updates)
 		Watches(&kubevirtv1.VirtualMachineInstance{}, &handler.EnqueueRequestForObject{}).
-		// 2. Filter events so we only reconcile when relevant data changes
 		WithEventFilter(predicate.Funcs{
-			UpdateFunc: func(e event.UpdateEvent) bool {
-				// Only reconcile if Annotations changed
-				return e.ObjectOld.GetAnnotations() != e.ObjectNew.GetAnnotations()
-			},
-		}).
+        UpdateFunc: func(e event.UpdateEvent) bool {
+                if e.ObjectOld == nil || e.ObjectNew == nil {
+                    return false
+                }
+                annotationsChanged := !reflect.DeepEqual(e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations())
+                labelsChanged := !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels())
+
+                return annotationsChanged || labelsChanged
+            },
+        }).
 		Complete(r)
 }
