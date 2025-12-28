@@ -73,7 +73,18 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		cpu = int(vm.Spec.Template.Spec.Domain.Resources.Requests.Cpu().MilliValue()) / 1000
 		mem = vm.Spec.Template.Spec.Domain.Resources.Requests.Memory().String()
 	}
+	mem := "unknown"
 
+    if mem == "" || mem == "unknown" {
+        if vm.Spec.Template.Spec.Domain.Resources.Limits != nil {
+            mem = vm.Spec.Template.Spec.Domain.Resources.Limits.Memory().String()
+        }
+    }
+
+    if (mem == "" || mem == "unknown") && vm.Spec.Template.Spec.Domain.Memory != nil {
+        mem = vm.Spec.Template.Spec.Domain.Memory.Guest.String()
+    }
+	
 	osDistro := vm.Labels["kubevirt.io/template"]
 	annoData, _ := json.Marshal(vm.Annotations)
 // ... after fetching 'vm' ...
