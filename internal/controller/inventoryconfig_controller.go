@@ -82,17 +82,24 @@ func (r *InventoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	annoData, _ := json.Marshal(vm.Annotations)
 
-	// 6. Update Inventory (Upsert)
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO vm_inventory (cluster_name, vm_name, namespace, status, node_name, ip_address, cpu_cores, memory_gb, os_distro, annotations, last_seen)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-		ON CONFLICT (cluster_name, vm_name, namespace) 
-		DO UPDATE SET status=$4, node_name=$5, ip_address=$6, cpu_cores=$7, memory_gb=$8, os_distro=$9, annotations=$10, last_seen=NOW()`,
-		r.ClusterName, vm.Name, vm.Namespace, status, nodeName, ipAddr, cpu, mem, vm.Labels["kubevirt.io/os"], annoData)
-	if err != nil { 
-		l.Error(err, "Failed to upsert inventory")
-		return ctrl.Result{}, err 
-	}
+// 8. Deduplicated History Insert (FIXED SQL)
+    _, err = tx.ExecContext(ctx, `
+    INSERT INTO vm_history (cluster_name, vm_name, namespace, status, node_name, action) 
+    SELECT $1, $2, $3, $4, $5, 'SYNC'
+    WHERE NOT EXISTS (
+        SELECT 1 FROM (
+            SELECT status, node_name FROM vm_history 
+            WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3 
+            ORDER BY changed_at DESC LIMIT 1
+        ) AS last_state 
+        WHERE last_state.status = $4 AND last_state.node_name = $5
+    )`, 
+    r.ClusterName, vm.Name, vm.Namespace, status, nodeName)
+
+   if err != nil {
+      l.Error(err, "Failed to insert history - syntax error corrected")
+      return ctrl.Result{}, err // Rollback via defer
+   }
 
 	// 7. Sync Disks
 	_, _ = tx.ExecContext(ctx, "DELETE FROM vm_disks WHERE cluster_name=$1 AND vm_name=$2 AND namespace=$3", r.ClusterName, vm.Name, vm.Namespace)
